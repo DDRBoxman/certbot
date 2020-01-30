@@ -35,6 +35,7 @@ class Authenticator(dns_common.DNSAuthenticator):
     def __init__(self, *args, **kwargs):
         super(Authenticator, self).__init__(*args, **kwargs)
         self.credentials = None
+        self.project_id_override = None
 
     @classmethod
     def add_parser_arguments(cls, add):  # pylint: disable=arguments-differ
@@ -44,6 +45,7 @@ class Authenticator(dns_common.DNSAuthenticator):
                   'information about creating a service account and {1} for information about the' +
                   'required permissions.)').format(ACCT_URL, PERMISSIONS_URL),
             default=None)
+        add('project_id_override', help='Override project ID', default=None)
 
     def more_info(self): # pylint: disable=missing-docstring,no-self-use
         return 'This plugin configures a DNS TXT record to respond to a dns-01 challenge using ' + \
@@ -67,10 +69,10 @@ class Authenticator(dns_common.DNSAuthenticator):
             dns_common.validate_file_permissions(self.conf('credentials'))
 
     def _perform(self, domain, validation_name, validation):
-        self._get_google_client().add_txt_record(domain, validation_name, validation, self.ttl)
+        self._get_google_client().add_txt_record(domain, validation_name, validation, self.ttl, self.project_id_override)
 
     def _cleanup(self, domain, validation_name, validation):
-        self._get_google_client().del_txt_record(domain, validation_name, validation, self.ttl)
+        self._get_google_client().del_txt_record(domain, validation_name, validation, self.ttl, self.project_id_override)
 
     def _get_google_client(self):
         return _GoogleClient(self.conf('credentials'))
@@ -99,7 +101,7 @@ class _GoogleClient(object):
         else:
             self.dns = dns_api
 
-    def add_txt_record(self, domain, record_name, record_content, record_ttl):
+    def add_txt_record(self, domain, record_name, record_content, record_ttl, project_id_override):
         """
         Add a TXT record using the supplied information.
 
@@ -110,9 +112,13 @@ class _GoogleClient(object):
         :raises certbot.errors.PluginError: if an error occurs communicating with the Google API
         """
 
-        zone_id = self._find_managed_zone_id(domain)
+        project_id = self.project_id
+        if project_id_override:
+            project_id = project_id_override
 
-        record_contents = self.get_existing_txt_rrset(zone_id, record_name)
+        zone_id = self._find_managed_zone_id(domain, project_id)
+
+        record_contents = self.get_existing_txt_rrset(zone_id, record_name, project_id)
         if record_contents is None:
             record_contents = []
         add_records = record_contents[:]
@@ -151,13 +157,13 @@ class _GoogleClient(object):
         changes = self.dns.changes()  # changes | pylint: disable=no-member
 
         try:
-            request = changes.create(project=self.project_id, managedZone=zone_id, body=data)
+            request = changes.create(project=project_id, managedZone=zone_id, body=data)
             response = request.execute()
 
             status = response['status']
             change = response['id']
             while status == 'pending':
-                request = changes.get(project=self.project_id, managedZone=zone_id, changeId=change)
+                request = changes.get(project=project_id, managedZone=zone_id, changeId=change)
                 response = request.execute()
                 status = response['status']
         except googleapiclient_errors.Error as e:
@@ -165,7 +171,7 @@ class _GoogleClient(object):
             raise errors.PluginError('Error communicating with the Google Cloud DNS API: {0}'
                                      .format(e))
 
-    def del_txt_record(self, domain, record_name, record_content, record_ttl):
+    def del_txt_record(self, domain, record_name, record_content, record_ttl, project_id_override):
         """
         Delete a TXT record using the supplied information.
 
@@ -176,13 +182,17 @@ class _GoogleClient(object):
         :raises certbot.errors.PluginError: if an error occurs communicating with the Google API
         """
 
+        project_id = self.project_id
+        if project_id_override:
+            project_id = project_id_override
+
         try:
-            zone_id = self._find_managed_zone_id(domain)
+            zone_id = self._find_managed_zone_id(domain, project_id)
         except errors.PluginError as e:
             logger.warning('Error finding zone. Skipping cleanup.')
             return
 
-        record_contents = self.get_existing_txt_rrset(zone_id, record_name)
+        record_contents = self.get_existing_txt_rrset(zone_id, record_name, project_id)
         if record_contents is None:
             record_contents = ["\"" + record_content + "\""]
 
@@ -216,12 +226,12 @@ class _GoogleClient(object):
         changes = self.dns.changes()  # changes | pylint: disable=no-member
 
         try:
-            request = changes.create(project=self.project_id, managedZone=zone_id, body=data)
+            request = changes.create(project=project_id, managedZone=zone_id, body=data)
             request.execute()
         except googleapiclient_errors.Error as e:
             logger.warning('Encountered error deleting TXT record: %s', e)
 
-    def get_existing_txt_rrset(self, zone_id, record_name):
+    def get_existing_txt_rrset(self, zone_id, record_name, project_id_override):
         """
         Get existing TXT records from the RRset for the record name.
 
@@ -235,8 +245,12 @@ class _GoogleClient(object):
         :rtype: `list` of `string` or `None`
 
         """
+        project_id = self.project_id
+        if project_id_override:
+            project_id = project_id_override
+
         rrs_request = self.dns.resourceRecordSets()
-        request = rrs_request.list(managedZone=zone_id, project=self.project_id)
+        request = rrs_request.list(managedZone=zone_id, project=project_id)
         # Add dot as the API returns absolute domains
         record_name += "."
         try:
@@ -252,7 +266,7 @@ class _GoogleClient(object):
                         return rr["rrdatas"]
         return None
 
-    def _find_managed_zone_id(self, domain):
+    def _find_managed_zone_id(self, domain, project_id_override):
         """
         Find the managed zone for a given domain.
 
@@ -261,13 +275,17 @@ class _GoogleClient(object):
         :rtype: str
         :raises certbot.errors.PluginError: if the managed zone cannot be found.
         """
+        project_id = self.project_id
+        if project_id_override:
+            project_id = project_id_override
+
 
         zone_dns_name_guesses = dns_common.base_domain_name_guesses(domain)
 
         mz = self.dns.managedZones()  # managedZones | pylint: disable=no-member
         for zone_name in zone_dns_name_guesses:
             try:
-                request = mz.list(project=self.project_id, dnsName=zone_name + '.')
+                request = mz.list(project=project_id, dnsName=zone_name + '.')
                 response = request.execute()
                 zones = response['managedZones']
             except googleapiclient_errors.Error as e:
