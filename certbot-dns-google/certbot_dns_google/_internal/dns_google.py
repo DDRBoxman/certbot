@@ -35,7 +35,7 @@ class Authenticator(dns_common.DNSAuthenticator):
     def __init__(self, *args, **kwargs):
         super(Authenticator, self).__init__(*args, **kwargs)
         self.credentials = None
-        self.project_id_override = None
+        self.project_id_override = "v2-dns"
 
     @classmethod
     def add_parser_arguments(cls, add):  # pylint: disable=arguments-differ
